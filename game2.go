@@ -13,7 +13,7 @@ type Client struct {
     ws *websocket.Conn
     ch chan []byte
 }
-clients map[int]*Client
+var clients map[int]*Client
 var maxId int = 0
 var channelBufSize = 255
 
