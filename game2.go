@@ -13,7 +13,8 @@ type Client struct {
     ws *websocket.Conn
     ch chan []byte
 }
-var clients map[int]*Client
+var clients map[int]*Client = make(map[int]*Client)
+var delCh = make(chan *Client)
 var maxId int = 0
 var channelBufSize = 255
 
@@ -21,15 +22,21 @@ func (c *Client) listen() {
     for {
         select {
         case data := <-c.ch:
-            websocket.Message.Send(c.ws, data)
+            err := websocket.Message.Send(c.ws, data)
+            if err != nil {
+                log.Println("Error:", err.Error())
+                log.Println("Disconnecting client", c.id)
+                c.ws.Close()
+                delCh <- c;
+            }
         default:
             var data []byte
             err := websocket.Message.Receive(c.ws, &data)
             if err == io.EOF {
-                log.Println("Error:", err.Error())
+                // log.Println("Error:", err.Error())
             } else {
-                fmt.Println("Received: ", data, " (", string(data[:]), ")  Sending to all clients.")
-                sendAll(&data)
+                fmt.Println("Received:", data, "(", string(data[:]), ")  Sending to all clients.")
+                sendAll(data)
             }
         }
     }
@@ -40,7 +47,7 @@ func sendAll(data []byte) {
         select {
             case c.ch <- data:
             default:
-                delete(clients, c.id)
+                delCh <- c
                 err := fmt.Errorf("client %d is disconnected.", c.id)
                 log.Println("Error:", err.Error())
         }
@@ -52,9 +59,10 @@ func webHandler(ws *websocket.Conn) {
     // https://github.com/golang-samples/websocket/blob/master/websocket-chat/src/chat/server.go
     c := &Client{maxId, ws, make(chan []byte, channelBufSize)}
     maxId++
-    log.Println("Added new client with id ", c.id)
+    log.Println("Added new client with id", c.id)
     clients[c.id] = c
-    log.Println("Now ", len(s.clients), " clients connected.")
+    log.Println("Now", len(clients), "clients connected.")
+    c.listen()
 }
 
 // This example demonstrates a trivial echo server.
@@ -72,7 +80,8 @@ func main() {
 
     for {
         select {
-
+        case c := <-delCh:
+            delete(clients, c.id)
         }
     }
 }
