@@ -6,16 +6,23 @@ import (
     "log"
     "fmt"
     "golang.org/x/net/websocket"
+    "encoding/binary"
+    "bytes"
+)
+
+const (
+    specIDAssign uint32 = 1
+    specDisconnect uint32 = 2
 )
 
 type Client struct {
-    id int
+    id uint32
     ws *websocket.Conn
     ch chan []byte
 }
-var clients map[int]*Client = make(map[int]*Client)
+var clients map[uint32]*Client = make(map[uint32]*Client)
 var delCh = make(chan *Client)
-var maxId int = 0
+var maxId uint32 = 0
 var channelBufSize = 255
 
 func (c *Client) listen() {
@@ -28,6 +35,7 @@ func (c *Client) listen() {
                 log.Println("Disconnecting client", c.id)
                 c.ws.Close()
                 delCh <- c;
+                break
             }
         default:
             var data []byte
@@ -55,13 +63,20 @@ func sendAll(data []byte) {
 }
 
 func webHandler(ws *websocket.Conn) {
-    // good reference to continue:
-    // https://github.com/golang-samples/websocket/blob/master/websocket-chat/src/chat/server.go
+    // make a new client object
     c := &Client{maxId, ws, make(chan []byte, channelBufSize)}
     maxId++
     log.Println("Added new client with id", c.id)
+    // store it
     clients[c.id] = c
     log.Println("Now", len(clients), "clients connected.")
+    log.Println("Sending client their id of", c.id)
+    // send it the id that was assigned
+    buf := &bytes.Buffer{}
+    binary.Write(buf, binary.LittleEndian, specIDAssign)
+    binary.Write(buf, binary.LittleEndian, c.id)
+    c.ch <- buf.Bytes()
+    // start it listening
     c.listen()
 }
 
@@ -82,6 +97,10 @@ func main() {
         select {
         case c := <-delCh:
             delete(clients, c.id)
+            buf := &bytes.Buffer{}
+            binary.Write(buf, binary.LittleEndian, specDisconnect)
+            binary.Write(buf, binary.LittleEndian, c.id)
+            sendAll(buf.Bytes())
         }
     }
 }
