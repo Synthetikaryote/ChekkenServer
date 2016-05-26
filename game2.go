@@ -8,17 +8,24 @@ import (
     "golang.org/x/net/websocket"
     "encoding/binary"
     "bytes"
+    "math"
 )
 
 const (
-    specIDAssign uint32 = 1
+    specInitialize uint32 = 1
     specDisconnect uint32 = 2
+    specAnnounceConnect uint32 = 3
+    specUpdatePosition uint32 = 4
+
+    nameLength uint = 16
 )
 
 type Client struct {
     id uint32
     ws *websocket.Conn
     ch chan []byte
+    x, y, z float32
+    name string
 }
 var clients map[uint32]*Client = make(map[uint32]*Client)
 var delCh = make(chan *Client)
@@ -44,10 +51,31 @@ func (c *Client) listen() {
                 // log.Println("Error:", err.Error())
             } else {
                 fmt.Println("Received:", data, "(", string(data[:]), ")  Sending to all clients.")
+                spec := binary.LittleEndian.Uint32(data[0:4])
+                // bytes 4-7 is the id.  skip that
+                switch spec {
+                case specAnnounceConnect:
+                    c.name = string(data[8:8+nameLength])
+                    c.x = Float32FromBytes(data[8+nameLength:12+nameLength])
+                    c.y = Float32FromBytes(data[12+nameLength:16+nameLength])
+                    c.z = Float32FromBytes(data[16+nameLength:20+nameLength])
+                    fmt.Println(c.name, "entered the game at (", c.x, c.y, c.z, ")")
+                case specUpdatePosition:
+                    c.x = Float32FromBytes(data[8:12])
+                    c.y = Float32FromBytes(data[12:16])
+                    c.z = Float32FromBytes(data[16:20])
+                    fmt.Println(c.name, "moved to (", c.x, c.y, c.z, ")")
+                }
                 sendAll(data)
             }
         }
     }
+}
+
+func Float32FromBytes(bytes []byte) float32 {
+    bits := binary.LittleEndian.Uint32(bytes)
+    f := math.Float32frombits(bits)
+    return f
 }
 
 func sendAll(data []byte) {
@@ -64,7 +92,7 @@ func sendAll(data []byte) {
 
 func webHandler(ws *websocket.Conn) {
     // make a new client object
-    c := &Client{maxId, ws, make(chan []byte, channelBufSize)}
+    c := &Client{maxId, ws, make(chan []byte, channelBufSize), 0, 0, 0, ""}
     maxId++
     log.Println("Added new client with id", c.id)
     // store it
@@ -73,9 +101,39 @@ func webHandler(ws *websocket.Conn) {
     log.Println("Sending client their id of", c.id)
     // send it the id that was assigned
     buf := &bytes.Buffer{}
-    binary.Write(buf, binary.LittleEndian, specIDAssign)
+    binary.Write(buf, binary.LittleEndian, specInitialize)
     binary.Write(buf, binary.LittleEndian, c.id)
-    c.ch <- buf.Bytes()
+    // send it the number of other players
+    var otherPlayerCount uint32 = 0
+    for _, player := range clients {
+        if player.id == c.id {
+            continue
+        }
+        if player.name == "" {
+            continue
+        }
+        otherPlayerCount++
+    }
+    binary.Write(buf, binary.LittleEndian, otherPlayerCount)
+    // send it the information for each other player
+    for _, player := range clients {
+        if player.id == c.id {
+            continue
+        }
+        if player.name == "" {
+            continue
+        }
+        binary.Write(buf, binary.LittleEndian, player.id)
+        nameBytes := make([]byte, nameLength, nameLength)
+        copy(nameBytes, []byte(player.name))
+        binary.Write(buf, binary.LittleEndian, nameBytes)
+        binary.Write(buf, binary.LittleEndian, player.x)
+        binary.Write(buf, binary.LittleEndian, player.y)
+        binary.Write(buf, binary.LittleEndian, player.z)
+    }
+    data := buf.Bytes()
+    fmt.Println("Sending the new player", data, "(", string(data[:]), ")")
+    c.ch <- data
     // start it listening
     c.listen()
 }
