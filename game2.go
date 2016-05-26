@@ -24,15 +24,23 @@ type Client struct {
     id uint32
     ws *websocket.Conn
     ch chan []byte
+    doneCh chan bool
     x, y, z float32
     name string
 }
-var clients map[uint32]*Client = make(map[uint32]*Client)
-var delCh = make(chan *Client)
-var maxId uint32 = 0
 var channelBufSize = 255
+var clients map[uint32]*Client = make(map[uint32]*Client)
+var delCh = make(chan *Client, channelBufSize)
+var sendAllCh = make(chan []byte, channelBufSize)
+var maxId uint32 = 0
 
 func (c *Client) listen() {
+   	go c.listenWrite();
+   	c.listenRead();
+}
+
+func (c *Client) listenWrite() {
+	log.Println(c.id, "starting listenWrite")
     for {
         select {
         case data := <-c.ch:
@@ -40,15 +48,34 @@ func (c *Client) listen() {
             if err != nil {
                 log.Println("Error:", err.Error())
                 log.Println("Disconnecting client", c.id)
-                c.ws.Close()
                 delCh <- c;
-                break
+                return
             }
+        case <- c.doneCh:
+        	delCh <- c
+        	c.doneCh <- true
+        	return
+        }
+    }
+	log.Println(c.id, "ending listenWrite")
+}
+
+func (c *Client) listenRead() {
+	log.Println(c.id, "starting listenRead")
+    for {
+        select {
+        case <-c.doneCh:
+        	delCh <- c
+        	c.doneCh <- true
+        	return
         default:
             var data []byte
             err := websocket.Message.Receive(c.ws, &data)
             if err == io.EOF {
-                // log.Println("Error:", err.Error())
+            	log.Println("Error: io.EOF for client", c.id)
+                c.doneCh <- true
+            } else if (err != nil) {
+				log.Println("Error:", err.Error())
             } else {
                 fmt.Println("Received:", data, "(", string(data[:]), ")  Sending to all clients.")
                 spec := binary.LittleEndian.Uint32(data[0:4])
@@ -66,10 +93,11 @@ func (c *Client) listen() {
                     c.z = Float32FromBytes(data[16:20])
                     fmt.Println(c.name, "moved to (", c.x, c.y, c.z, ")")
                 }
-                sendAll(data)
+                sendAllCh <- data
             }
         }
     }
+    log.Println(c.id, "ending listenRead")
 }
 
 func Float32FromBytes(bytes []byte) float32 {
@@ -92,7 +120,7 @@ func sendAll(data []byte) {
 
 func webHandler(ws *websocket.Conn) {
     // make a new client object
-    c := &Client{maxId, ws, make(chan []byte, channelBufSize), 0, 0, 0, ""}
+    c := &Client{maxId, ws, make(chan []byte, channelBufSize), make(chan bool, channelBufSize), 0, 0, 0, ""}
     maxId++
     log.Println("Added new client with id", c.id)
     // store it
@@ -146,19 +174,25 @@ func main() {
         s := websocket.Server{Handler: websocket.Handler(webHandler)}
         s.ServeHTTP(w, req)
     });
+
+	go func() {
+	    for {
+	        select {
+	        case c := <-delCh:
+	        	log.Println("deleting client", c.id)
+	            delete(clients, c.id)
+	            buf := &bytes.Buffer{}
+	            binary.Write(buf, binary.LittleEndian, specDisconnect)
+	            binary.Write(buf, binary.LittleEndian, c.id)
+	            sendAll(buf.Bytes())
+	        case data := <-sendAllCh:
+	        	sendAll(data)
+	        }
+	    }
+	}()
+
     err := http.ListenAndServe(":8080", nil)
     if err != nil {
         panic("ListenAndServe: " + err.Error())
-    }
-
-    for {
-        select {
-        case c := <-delCh:
-            delete(clients, c.id)
-            buf := &bytes.Buffer{}
-            binary.Write(buf, binary.LittleEndian, specDisconnect)
-            binary.Write(buf, binary.LittleEndian, c.id)
-            sendAll(buf.Bytes())
-        }
     }
 }
