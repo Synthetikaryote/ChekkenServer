@@ -1,7 +1,6 @@
 package main
 
 import (
-    "io"
     "net/http"
     "log"
     "fmt"
@@ -9,6 +8,7 @@ import (
     "encoding/binary"
     "bytes"
     "math"
+    "time"
 )
 
 const (
@@ -16,6 +16,8 @@ const (
     specDisconnect uint32 = 2
     specAnnounceConnect uint32 = 3
     specUpdatePosition uint32 = 4
+    specHeartbeat uint32 = 5
+    specHeartbeatResponse uint32 = 6
 
     nameLength uint = 16
 )
@@ -27,16 +29,18 @@ type Client struct {
     doneCh chan bool
     x, y, z float32
     name string
+    lastReply time.Time
 }
 var channelBufSize = 255
 var clients map[uint32]*Client = make(map[uint32]*Client)
 var delCh = make(chan *Client, channelBufSize)
 var sendAllCh = make(chan []byte, channelBufSize)
 var maxId uint32 = 0
+var heartbeatWait = 3.0 * time.Second
 
 func (c *Client) listen() {
-   	go c.listenWrite();
-   	c.listenRead();
+    go c.listenRead();
+   	c.listenWrite();
 }
 
 func (c *Client) listenWrite() {
@@ -44,9 +48,17 @@ func (c *Client) listenWrite() {
     for {
         select {
         case data := <-c.ch:
+            spec := binary.LittleEndian.Uint32(data[0:4])
+            switch spec {
+                case specHeartbeat:
+                    err := c.ws.SetReadDeadline(c.lastReply.Add(heartbeatWait))
+                    if err != nil {
+                        log.Println("SetReadDeadline error:", err)
+                    }
+            }
             err := websocket.Message.Send(c.ws, data)
             if err != nil {
-                log.Println("Error:", err.Error())
+                log.Println("listenWrite Error:", err.Error())
                 log.Println("Disconnecting client", c.id)
                 delCh <- c;
                 return
@@ -71,13 +83,14 @@ func (c *Client) listenRead() {
         default:
             var data []byte
             err := websocket.Message.Receive(c.ws, &data)
-            if err == io.EOF {
-            	log.Println("Error: io.EOF for client", c.id)
+            if err != nil {
+            	log.Println("Error:", err, "for client", c.id)
                 c.doneCh <- true
             } else if (err != nil) {
 				log.Println("Error:", err.Error())
             } else {
-                fmt.Println("Received:", data, "(", string(data[:]), ")  Sending to all clients.")
+                doSend := true
+                // fmt.Println("Received:", data, "(", string(data[:]), ")  Sending to all clients.")
                 spec := binary.LittleEndian.Uint32(data[0:4])
                 // bytes 4-7 is the id.  skip that
                 switch spec {
@@ -91,9 +104,14 @@ func (c *Client) listenRead() {
                     c.x = Float32FromBytes(data[8:12])
                     c.y = Float32FromBytes(data[12:16])
                     c.z = Float32FromBytes(data[16:20])
-                    fmt.Println(c.name, "moved to (", c.x, c.y, c.z, ")")
+                    // fmt.Println(c.name, "moved to (", c.x, c.y, c.z, ")")
+                case specHeartbeatResponse:
+                    c.lastReply = time.Now()
+                    doSend = false
                 }
-                sendAllCh <- data
+                if doSend {
+                    sendAllCh <- data
+                }
             }
         }
     }
@@ -120,7 +138,7 @@ func sendAll(data []byte) {
 
 func webHandler(ws *websocket.Conn) {
     // make a new client object
-    c := &Client{maxId, ws, make(chan []byte, channelBufSize), make(chan bool, channelBufSize), 0, 0, 0, ""}
+    c := &Client{maxId, ws, make(chan []byte, channelBufSize), make(chan bool, channelBufSize), 0, 0, 0, "", time.Now()}
     maxId++
     log.Println("Added new client with id", c.id)
     // store it
@@ -175,6 +193,7 @@ func main() {
         s.ServeHTTP(w, req)
     });
 
+    heartbeat := time.NewTicker(1 * time.Second)
 	go func() {
 	    for {
 	        select {
@@ -187,6 +206,11 @@ func main() {
 	            sendAll(buf.Bytes())
 	        case data := <-sendAllCh:
 	        	sendAll(data)
+	        case <-heartbeat.C:
+				buf := &bytes.Buffer{}
+				binary.Write(buf, binary.LittleEndian, specHeartbeat)
+                data := buf.Bytes()
+        	    sendAll(data)
 	        }
 	    }
 	}()
