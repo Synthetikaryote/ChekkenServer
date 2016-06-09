@@ -19,6 +19,7 @@ const (
     specHeartbeat uint32 = 5
     specHeartbeatResponse uint32 = 6
     specUpdateHealth uint32 = 7
+    specUpdateState uint32 = 8
 
     nameLength uint = 16
 )
@@ -32,21 +33,23 @@ type Client struct {
     health float32
     name string
     lastReply time.Time
+    state []byte
 }
 var channelBufSize = 255
 var clients map[uint32]*Client = make(map[uint32]*Client)
 var delCh = make(chan *Client, channelBufSize)
 var sendAllCh = make(chan []byte, channelBufSize)
 var maxId uint32 = 0
-var heartbeatWait = 4.0 * time.Second
+var heartbeatWait = 30.0 * time.Second
+var playerStateBufSize = 2048
 
 func (c *Client) listen() {
     go c.listenRead();
-   	c.listenWrite();
+    c.listenWrite();
 }
 
 func (c *Client) listenWrite() {
-	log.Println(c.id, "starting listenWrite")
+    log.Println(c.id, "starting listenWrite")
     for {
         select {
         case data := <-c.ch:
@@ -66,30 +69,30 @@ func (c *Client) listenWrite() {
                 return
             }
         case <- c.doneCh:
-        	delCh <- c
-        	c.doneCh <- true
-        	return
+            delCh <- c
+            c.doneCh <- true
+            return
         }
     }
-	log.Println(c.id, "ending listenWrite")
+    log.Println(c.id, "ending listenWrite")
 }
 
 func (c *Client) listenRead() {
-	log.Println(c.id, "starting listenRead")
+    log.Println(c.id, "starting listenRead")
     for {
         select {
         case <-c.doneCh:
-        	delCh <- c
-        	c.doneCh <- true
-        	return
+            delCh <- c
+            c.doneCh <- true
+            return
         default:
             var data []byte
             err := websocket.Message.Receive(c.ws, &data)
             if err != nil {
-            	log.Println("Error:", err, "for client", c.id)
+                log.Println("Error:", err, "for client", c.id)
                 c.doneCh <- true
             } else if (err != nil) {
-				log.Println("Error:", err.Error())
+                log.Println("Error:", err.Error())
             } else {
                 doSend := true
                 // fmt.Println("Received:", data, "(", string(data[:]), ")  Sending to all clients.")
@@ -109,6 +112,8 @@ func (c *Client) listenRead() {
                     c.z = Float32FromBytes(data[16:20])
                 case specUpdateHealth:
                     c.health = Float32FromBytes(data[8:12])
+                case specUpdateState:
+                    c.state = data[8:]
                 case specHeartbeatResponse:
                     c.lastReply = time.Now()
                     doSend = false
@@ -142,7 +147,7 @@ func sendAll(data []byte) {
 
 func webHandler(ws *websocket.Conn) {
     // make a new client object
-    c := &Client{maxId, ws, make(chan []byte, channelBufSize), make(chan bool, channelBufSize), 0, 0, 0, 0, "", time.Now()}
+    c := &Client{maxId, ws, make(chan []byte, channelBufSize), make(chan bool, channelBufSize), 0, 0, 0, 0, "", time.Now(), make([]byte, 0, playerStateBufSize)}
     maxId++
     log.Println("Added new client with id", c.id)
     // store it
