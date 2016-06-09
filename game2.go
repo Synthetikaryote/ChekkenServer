@@ -18,6 +18,7 @@ const (
     specUpdatePosition uint32 = 4
     specHeartbeat uint32 = 5
     specHeartbeatResponse uint32 = 6
+    specUpdateHealth uint32 = 7
 
     nameLength uint = 16
 )
@@ -28,6 +29,7 @@ type Client struct {
     ch chan []byte
     doneCh chan bool
     x, y, z float32
+    health float32
     name string
     lastReply time.Time
 }
@@ -36,7 +38,7 @@ var clients map[uint32]*Client = make(map[uint32]*Client)
 var delCh = make(chan *Client, channelBufSize)
 var sendAllCh = make(chan []byte, channelBufSize)
 var maxId uint32 = 0
-var heartbeatWait = 3.0 * time.Second
+var heartbeatWait = 4.0 * time.Second
 
 func (c *Client) listen() {
     go c.listenRead();
@@ -99,12 +101,14 @@ func (c *Client) listenRead() {
                     c.x = Float32FromBytes(data[8+nameLength:12+nameLength])
                     c.y = Float32FromBytes(data[12+nameLength:16+nameLength])
                     c.z = Float32FromBytes(data[16+nameLength:20+nameLength])
-                    fmt.Println(c.name, "entered the game at (", c.x, c.y, c.z, ")")
+                    c.health = Float32FromBytes(data[20+nameLength:24+nameLength])
+                    fmt.Println(c.name, "entered the game at (", c.x, c.y, c.z, ") with health", c.health)
                 case specUpdatePosition:
                     c.x = Float32FromBytes(data[8:12])
                     c.y = Float32FromBytes(data[12:16])
                     c.z = Float32FromBytes(data[16:20])
-                    // fmt.Println(c.name, "moved to (", c.x, c.y, c.z, ")")
+                case specUpdateHealth:
+                    c.health = Float32FromBytes(data[8:12])
                 case specHeartbeatResponse:
                     c.lastReply = time.Now()
                     doSend = false
@@ -138,7 +142,7 @@ func sendAll(data []byte) {
 
 func webHandler(ws *websocket.Conn) {
     // make a new client object
-    c := &Client{maxId, ws, make(chan []byte, channelBufSize), make(chan bool, channelBufSize), 0, 0, 0, "", time.Now()}
+    c := &Client{maxId, ws, make(chan []byte, channelBufSize), make(chan bool, channelBufSize), 0, 0, 0, 0, "", time.Now()}
     maxId++
     log.Println("Added new client with id", c.id)
     // store it
@@ -176,6 +180,7 @@ func webHandler(ws *websocket.Conn) {
         binary.Write(buf, binary.LittleEndian, player.x)
         binary.Write(buf, binary.LittleEndian, player.y)
         binary.Write(buf, binary.LittleEndian, player.z)
+        binary.Write(buf, binary.LittleEndian, player.health)
     }
     data := buf.Bytes()
     fmt.Println("Sending the new player", data, "(", string(data[:]), ")")
@@ -214,6 +219,12 @@ func main() {
 	        }
 	    }
 	}()
+
+    http.Handle("/Chekken/", http.StripPrefix("/Chekken/",
+        http.FileServer(http.Dir("../ChekkenBuild"))))
+    go func() {
+        log.Fatal(http.ListenAndServe(":80", nil))
+    }()
 
     err := http.ListenAndServe(":8080", nil)
     if err != nil {
