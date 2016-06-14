@@ -225,12 +225,6 @@ func main() {
 	    }
 	}()
 
-    http.Handle("/Chekken/", http.StripPrefix("/Chekken/",
-        http.FileServer(http.Dir("../ChekkenBuild"))))
-    go func() {
-        log.Fatal(http.ListenAndServe(":80", nil))
-    }()
-
     err := http.ListenAndServe(":8080", nil)
     if err != nil {
         panic("ListenAndServe: " + err.Error())
